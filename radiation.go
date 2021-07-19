@@ -10,6 +10,7 @@ import (
 	"log"
 	"encoding/json"
 	"net/http"
+	"golang.org/x/term"
 )
 
 const (
@@ -38,6 +39,7 @@ type EntryList struct {
 type Config struct {
 	Token string
 	Server_url string
+	Max_list_entries int
 }
 
 func RequestOnce(url string) ([]byte, error) {
@@ -151,23 +153,76 @@ func main() {
 	if err != nil {
 		log.Fatalf("configuration file error: %s", err)
 	}
-	entry_list, err := GetEntryList()
+
+	old_term, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		log.Fatalf("terminal config error: %s", err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), old_term)
+	t := term.NewTerminal(os.Stdin, "> ")
+
+	var (
+		entry_list *EntryList
+		list_position int = 0
+	)
+	entry_list, err = GetEntryList()
 	if err != nil {
 		log.Fatalf("error getting entrylist: %s", err)
 	}
-	for i := 0;i < 10;i++ {
-		fmt.Println(entry_list.Entries[i].Id, entry_list.Entries[i].Title)
-	}
-	ent, err := GetEntry(entry_list.Entries[0].Id);
-	if err != nil {
-		log.Fatalf("error getting entry %d: %s", 0, err)
-	}
 
-	fmt.Println(ent.Title)
-	text, err := HtmlConvert(ent.Content)
-	if err != nil {
-		log.Fatalf("html conversion error: %s", err)
+	for {
+		req, err := t.ReadLine()
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			log.Fatalf("read command error: %s", err)
+		}
+
+		num, conv_err := strconv.Atoi(req)
+		if conv_err == nil {
+			t.Write([]byte("\033\143"))
+			ent := &entry_list.Entries[num]
+			fmt.Println(ent.Title)
+			text, err := HtmlConvert(ent.Content)
+			if err != nil {
+				log.Fatalf("html conversion error: %s", err)
+			}
+			t.Write([]byte(text + "\n"))
+			entry_list.Entries = append(entry_list.Entries[:num], entry_list.Entries[num + 1:]...)
+			continue
+		}
+
+		switch req {
+			case "r", "refresh":
+				entry_list, err = GetEntryList()
+				if err != nil {
+					log.Fatalf("error getting entrylist: %s", err)
+				}
+			case "l", "list":
+				for index := 0; index < config.Max_list_entries && list_position + index < len(entry_list.Entries); index++ {
+					pos := index + list_position
+					str := fmt.Sprintf("%d. %s\n", pos, entry_list.Entries[pos].Title)
+					t.Write([]byte(str))
+				}
+			case "n", "next":
+				if list_position + config.Max_list_entries < len(entry_list.Entries) {
+					list_position += config.Max_list_entries
+				} else {
+					t.Write([]byte("Already at last page\n"))
+				}
+			case "p", "prev", "previous":
+				if list_position - config.Max_list_entries >= 0 {
+					list_position -= config.Max_list_entries
+				} else {
+					t.Write([]byte("Already at first page\n"))
+				}
+			case "h", "help":
+				t.Write([]byte("list:\tList unread articles\nprev:\tSwitch to previous page\nnext:\tSwitch to next page\nquit:\tQuit Project Radiation\n"))
+			case "q", "quit":
+				return
+			default:
+				t.Write([]byte("Unknown command\n"))
+		}
 	}
-	fmt.Println(text)
 }
-
