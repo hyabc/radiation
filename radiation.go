@@ -164,16 +164,15 @@ func HtmlConvert(html string) (string, error) {
 	return string(text), nil
 }
 
-func PrintEntry(num int) (string, string) {
+func PrintEntry(num int) (string, string, int) {
 	if !(0 <= num && num < len(entry_list.Entries)) {
-		return "", "Requested article out of bound\n"
+		return "", "Requested article out of bound\n", 0
 	}
 	ent := &entry_list.Entries[num]
-	title := ent.Title
 
 	text, err := HtmlConvert(ent.Content)
 	if err != nil {
-		log.Fatalf("html conversion error: %s", err)
+		text = fmt.Sprintf("html conversion error: %s", err)
 	}
 
 	entry_list.Entries = append(entry_list.Entries[:num], entry_list.Entries[num + 1:]...)
@@ -183,7 +182,7 @@ func PrintEntry(num int) (string, string) {
 		entry_list.Position--;
 	}
 
-	return title, text
+	return ent.Title, text, ent.Id
 }
 
 func PrintEntryList() string {
@@ -283,12 +282,12 @@ func ProcessInput(t *term.Terminal, req string) bool {
 		num = entry_list.Position * config.Page_entries
 	}
 	if conv_err == nil {
-		title, text := PrintEntry(num)
+		title, text, id := PrintEntry(num)
 		article = &Article{Title: title, Lines: strings.Split(text, "\n"), Position: 0}
 
 		t.Write([]byte(PrintArticleSection()))
 		if article != nil {
-			prompt := fmt.Sprintf("(%d) > ", num)
+			prompt := fmt.Sprintf("(%d) > ", id)
 			t.SetPrompt(prompt)
 		}
 		return true
