@@ -7,6 +7,7 @@ import (
 	"path"
 	"os/exec"
 	"strconv"
+	"strings"
 	"log"
 	"encoding/json"
 	"net/http"
@@ -22,6 +23,9 @@ const (
 
 var (
 	config Config
+	entry_list *EntryList
+	list_position int
+	article *Article
 )
 
 type Entry struct {
@@ -39,7 +43,13 @@ type EntryList struct {
 type Config struct {
 	Token string
 	Server_url string
-	Max_list_entries int
+	Page_entries int
+	Lines int
+}
+
+type Article struct {
+	Lines []string
+	Title string
 }
 
 func RequestOnce(url string) ([]byte, error) {
@@ -148,12 +158,172 @@ func HtmlConvert(html string) (string, error) {
 	return string(text), nil
 }
 
+func PrintEntry(num int) (string, string) {
+	if !(0 <= num && num < len(entry_list.Entries)) {
+		return "", "Requested article out of bound\n"
+	}
+	ent := &entry_list.Entries[num]
+	title := ent.Title
+
+	text, err := HtmlConvert(ent.Content)
+	if err != nil {
+		log.Fatalf("html conversion error: %s", err)
+	}
+
+	entry_list.Entries = append(entry_list.Entries[:num], entry_list.Entries[num + 1:]...)
+	if len(entry_list.Entries) == 0 {
+		list_position = 0;
+	} else if list_position * config.Page_entries >= len(entry_list.Entries) {
+		list_position--;
+	}
+
+	return title, text
+}
+
+func PrintEntryList() string {
+	if len(entry_list.Entries) == 0 {
+		return "Empty entry list\n"
+	}
+	var str string
+	for index := 0; index < config.Page_entries; index++ {
+		pos := index + list_position * config.Page_entries;
+		if pos >= len(entry_list.Entries) {
+			break
+		}
+		line := fmt.Sprintf("%d. %s\n", pos, entry_list.Entries[pos].Title)
+		str += line
+	}
+	return str
+}
+
+func PrintHelpMsg() string {
+	var str string
+	str += "#:\tPrint article #\n"
+	str += "list:\tList unread articles\n"
+	str += "prev:\tSwitch to previous page\n"
+	str += "next:\tSwitch to next page\n"
+	str += "help:\tShow help message\n"
+	str += "quit:\tQuit Project Radiation\n"
+	return str
+}
+
+func PrintEntryHelpMsg() string {
+	var str string
+	str += "continue:\tContinue article\n"
+	str += "help:\tShow help message\n"
+	str += "quit:\tQuit this article and return\n"
+	return str
+}
+
+func RefreshEntryList() string {
+	var err error
+	entry_list, err = GetEntryList()
+	if err != nil {
+		return fmt.Sprintf("Refresh entrylist failed: %s\n", err)
+	}
+	return ""
+}
+
+func SwitchNext() string {
+	if (list_position + 1) * config.Page_entries < len(entry_list.Entries) {
+		list_position++;
+		return PrintEntryList()
+	} else {
+		return "Already at last page\n"
+	}
+}
+
+func SwitchPrev() string {
+	if list_position - 1 >= 0 {
+		list_position--;
+		return PrintEntryList()
+	} else {
+		return "Already at first page\n"
+	}
+}
+
+func PrintArticleSection(t *term.Terminal) {
+	t.Write([]byte(article.Title))
+	t.Write([]byte("\n\n"))
+
+	var section []string
+	if len(article.Lines) <= config.Lines {
+		section = article.Lines
+		article = nil
+	} else {
+		section = article.Lines[:config.Lines]
+		article.Lines = article.Lines[config.Lines:]
+	}
+	for _, line := range section {
+		t.Write([]byte(line))
+		t.Write([]byte("\n"))
+	}
+}
+
+func ProcessInput(t *term.Terminal, req string) bool {
+	//Test numerical input
+	num, conv_err := strconv.Atoi(req)
+	if req == "" {
+		conv_err = nil
+		num = list_position * config.Page_entries
+	}
+	if conv_err == nil {
+		title, text := PrintEntry(num)
+		article = &Article{Title: title, Lines: strings.Split(text, "\n")}
+
+		PrintArticleSection(t)
+		if article != nil {
+			prompt := fmt.Sprintf("(%d) > ", num)
+			t.SetPrompt(prompt)
+		}
+		return true
+	}
+
+	//Test command
+	switch req {
+	case "r", "refresh":
+		t.Write([]byte(RefreshEntryList()))
+	case "l", "list":
+		t.Write([]byte(PrintEntryList()))
+	case "n", "next":
+		t.Write([]byte(SwitchNext()))
+	case "p", "prev", "previous":
+		t.Write([]byte(SwitchPrev()))
+	case "h", "help", "?":
+		t.Write([]byte(PrintHelpMsg()))
+	case "q", "quit":
+		return false
+	default:
+		t.Write([]byte("Unknown command\n"))
+	}
+	return true
+}
+
+func ProcessInputEntry(t *term.Terminal, req string) {
+	switch req {
+	case "", "c", "continue":
+		PrintArticleSection(t)
+		if article == nil {
+			t.SetPrompt("> ")
+		}
+	case "q", "quit":
+		article = nil
+		t.SetPrompt("> ")
+	case "h", "help", "?":
+		t.Write([]byte(PrintEntryHelpMsg()))
+	default:
+		t.Write([]byte("Unknown command\n"))
+	}
+}
+
 func main() {
+	//Read config
 	err := ReadConfig()
 	if err != nil {
 		log.Fatalf("configuration file error: %s", err)
 	}
 
+	//Set terminal to raw mode
 	old_term, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		log.Fatalf("terminal config error: %s", err)
@@ -161,17 +331,14 @@ func main() {
 	defer term.Restore(int(os.Stdin.Fd()), old_term)
 	t := term.NewTerminal(os.Stdin, "> ")
 
-	var (
-		entry_list *EntryList
-		list_position int = 0
-	)
-	entry_list, err = GetEntryList()
-	if err != nil {
-		log.Fatalf("error getting entrylist: %s", err)
-	}
+	//Generate entrylist
+	t.Write([]byte(RefreshEntryList()))
 
 	for {
-		req, err := t.ReadLine()
+		//Readline and clear screen
+		var req string
+		req, err = t.ReadLine()
+		t.Write([]byte("\033\143"))
 		if err != nil {
 			if err == io.EOF {
 				return
@@ -179,50 +346,13 @@ func main() {
 			log.Fatalf("read command error: %s", err)
 		}
 
-		num, conv_err := strconv.Atoi(req)
-		if conv_err == nil {
-			t.Write([]byte("\033\143"))
-			ent := &entry_list.Entries[num]
-			fmt.Println(ent.Title)
-			text, err := HtmlConvert(ent.Content)
-			if err != nil {
-				log.Fatalf("html conversion error: %s", err)
-			}
-			t.Write([]byte(text + "\n"))
-			entry_list.Entries = append(entry_list.Entries[:num], entry_list.Entries[num + 1:]...)
-			continue
-		}
-
-		switch req {
-			case "r", "refresh":
-				entry_list, err = GetEntryList()
-				if err != nil {
-					log.Fatalf("error getting entrylist: %s", err)
-				}
-			case "l", "list":
-				for index := 0; index < config.Max_list_entries && list_position + index < len(entry_list.Entries); index++ {
-					pos := index + list_position
-					str := fmt.Sprintf("%d. %s\n", pos, entry_list.Entries[pos].Title)
-					t.Write([]byte(str))
-				}
-			case "n", "next":
-				if list_position + config.Max_list_entries < len(entry_list.Entries) {
-					list_position += config.Max_list_entries
-				} else {
-					t.Write([]byte("Already at last page\n"))
-				}
-			case "p", "prev", "previous":
-				if list_position - config.Max_list_entries >= 0 {
-					list_position -= config.Max_list_entries
-				} else {
-					t.Write([]byte("Already at first page\n"))
-				}
-			case "h", "help":
-				t.Write([]byte("list:\tList unread articles\nprev:\tSwitch to previous page\nnext:\tSwitch to next page\nquit:\tQuit Project Radiation\n"))
-			case "q", "quit":
+		if article == nil {
+			cont := ProcessInput(t, req)
+			if !cont {
 				return
-			default:
-				t.Write([]byte("Unknown command\n"))
+			}
+		} else {
+			ProcessInputEntry(t, req)
 		}
 	}
 }
