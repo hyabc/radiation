@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"log"
+	"sync"
 	"encoding/json"
 	"net/http"
 	"golang.org/x/term"
@@ -25,6 +26,7 @@ var (
 	config Config
 	entry_list *EntryList
 	article *Article
+	wg sync.WaitGroup
 )
 
 type Entry struct {
@@ -58,7 +60,7 @@ type Article struct {
 	Position int
 }
 
-func RequestOnce(url string) ([]byte, error) {
+func GetRequestOnce(url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -79,9 +81,43 @@ func RequestOnce(url string) ([]byte, error) {
 	return body, nil
 }
 
-func Request(url string) (data []byte, err error) {
+func PutRequestOnce(url, content, content_type string) ([]byte, error) {
+	req, err := http.NewRequest("PUT", url, strings.NewReader(content))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Auth-Token", config.Token)
+	req.Header.Set("Content-Type", content_type)
+	req.Header.Set("Content-Length", strconv.Itoa(len(content)))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return nil, fmt.Errorf("HTTP error %d\n", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func GetRequest(url string) (data []byte, err error) {
 	for count := 0; count < max_retries; count++ {
-		data, err = RequestOnce(url)
+		data, err = GetRequestOnce(url)
+		if err == nil {
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("retrying failed %s", err)
+}
+
+func PutRequest(url, content, content_type string) (data []byte, err error) {
+	for count := 0; count < max_retries; count++ {
+		data, err = PutRequestOnce(url, content, content_type)
 		if err == nil {
 			return data, nil
 		}
@@ -108,7 +144,7 @@ func ReadConfig() (error) {
 }
 
 func GetEntryList() (*EntryList, error) {
-	data, err := Request(config.Server_url + entrylist_url)
+	data, err := GetRequest(config.Server_url + entrylist_url)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +157,7 @@ func GetEntryList() (*EntryList, error) {
 }
 
 func GetEntry(id int) (*Entry, error) {
-	data, err := Request(config.Server_url + entry_url + "/" + strconv.Itoa(id))
+	data, err := GetRequest(config.Server_url + entry_url + "/" + strconv.Itoa(id))
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +205,8 @@ func PrintEntry(num int) (string, string, int) {
 		return "", "Requested article out of bound\n", 0
 	}
 	ent := &entry_list.Entries[num]
+	title := ent.Title
+	id := ent.Id
 
 	text, err := HtmlConvert(ent.Content)
 	if err != nil {
@@ -182,7 +220,7 @@ func PrintEntry(num int) (string, string, int) {
 		entry_list.Position--;
 	}
 
-	return ent.Title, text, ent.Id
+	return title, text, id
 }
 
 func PrintEntryList() string {
@@ -285,11 +323,23 @@ func ProcessInput(t *term.Terminal, req string) bool {
 		title, text, id := PrintEntry(num)
 		article = &Article{Title: title, Lines: strings.Split(text, "\n"), Position: 0}
 
+		//Print content
 		t.Write([]byte(PrintArticleSection()))
 		if article != nil {
 			prompt := fmt.Sprintf("(%d) > ", id)
 			t.SetPrompt(prompt)
 		}
+
+		//Mark read
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			err := MarkEntryRead(id)
+			if err != nil {
+				fmt.Printf("Error marking %d read: %s\n", id, err)
+			}
+		}(id)
+
 		return true
 	}
 
@@ -333,6 +383,20 @@ func ProcessInputEntry(t *term.Terminal, req string) {
 	}
 }
 
+func MarkEntryRead(id int) error {
+	url := config.Server_url + entry_url
+	t := &EntryUpdate{Entry_ids: []int{id}, Status: "read"}
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	_, err = PutRequest(url, string(data), "application/json")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func main() {
 	//Read config
 	err := ReadConfig()
@@ -347,6 +411,8 @@ func main() {
 	}
 	defer term.Restore(int(os.Stdin.Fd()), old_term)
 	t := term.NewTerminal(os.Stdin, "> ")
+
+	defer wg.Wait()
 
 	//Generate entrylist
 	t.Write([]byte(RefreshEntryList()))
