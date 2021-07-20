@@ -24,7 +24,6 @@ const (
 var (
 	config Config
 	entry_list *EntryList
-	list_position int
 	article *Article
 )
 
@@ -35,8 +34,14 @@ type Entry struct {
 	Content string
 }
 
+type EntryUpdate struct {
+	Entry_ids []int
+	Status string
+}
+
 type EntryList struct {
 	Total int
+	Position int
 	Entries []Entry
 }
 
@@ -50,6 +55,7 @@ type Config struct {
 type Article struct {
 	Lines []string
 	Title string
+	Position int
 }
 
 func RequestOnce(url string) ([]byte, error) {
@@ -172,9 +178,9 @@ func PrintEntry(num int) (string, string) {
 
 	entry_list.Entries = append(entry_list.Entries[:num], entry_list.Entries[num + 1:]...)
 	if len(entry_list.Entries) == 0 {
-		list_position = 0;
-	} else if list_position * config.Page_entries >= len(entry_list.Entries) {
-		list_position--;
+		entry_list.Position = 0;
+	} else if entry_list.Position * config.Page_entries >= len(entry_list.Entries) {
+		entry_list.Position--;
 	}
 
 	return title, text
@@ -186,7 +192,7 @@ func PrintEntryList() string {
 	}
 	var str string
 	for index := 0; index < config.Page_entries; index++ {
-		pos := index + list_position * config.Page_entries;
+		pos := index + entry_list.Position * config.Page_entries;
 		if pos >= len(entry_list.Entries) {
 			break
 		}
@@ -221,43 +227,52 @@ func RefreshEntryList() string {
 	if err != nil {
 		return fmt.Sprintf("Refresh entrylist failed: %s\n", err)
 	}
-	return ""
+	return PrintEntryList()
 }
 
-func SwitchNext() string {
-	if (list_position + 1) * config.Page_entries < len(entry_list.Entries) {
-		list_position++;
+func SwitchEntryListNext() string {
+	if (entry_list.Position + 1) * config.Page_entries < len(entry_list.Entries) {
+		entry_list.Position++
 		return PrintEntryList()
 	} else {
-		return "Already at last page\n"
+		return PrintEntryList() + "Already at last page\n"
 	}
 }
 
-func SwitchPrev() string {
-	if list_position - 1 >= 0 {
-		list_position--;
+func SwitchEntryListPrev() string {
+	if entry_list.Position - 1 >= 0 {
+		entry_list.Position--
 		return PrintEntryList()
 	} else {
-		return "Already at first page\n"
+		return PrintEntryList() + "Already at first page\n"
 	}
 }
 
-func PrintArticleSection(t *term.Terminal) {
-	t.Write([]byte(article.Title))
-	t.Write([]byte("\n\n"))
-
-	var section []string
-	if len(article.Lines) <= config.Lines {
-		section = article.Lines
-		article = nil
+func SwitchArticleNext() string {
+	if (article.Position + 1) * config.Lines < len(article.Lines) {
+		article.Position++
+		return PrintArticleSection()
 	} else {
-		section = article.Lines[:config.Lines]
-		article.Lines = article.Lines[config.Lines:]
+		return PrintArticleSection() + "Already at last page\n"
 	}
-	for _, line := range section {
-		t.Write([]byte(line))
-		t.Write([]byte("\n"))
+}
+
+func SwitchArticlePrev() string {
+	if article.Position - 1 >= 0 {
+		article.Position--;
+		return PrintArticleSection()
+	} else {
+		return PrintArticleSection() + "Already at first page\n"
 	}
+}
+
+func PrintArticleSection() string {
+	begin := article.Position * config.Lines
+	end := (article.Position + 1) * config.Lines
+	if len(article.Lines) < end {
+		end = len(article.Lines)
+	}
+	return article.Title + "\n\n" + strings.Join(article.Lines[begin:end], "\n") + "\n"
 }
 
 func ProcessInput(t *term.Terminal, req string) bool {
@@ -265,13 +280,13 @@ func ProcessInput(t *term.Terminal, req string) bool {
 	num, conv_err := strconv.Atoi(req)
 	if req == "" {
 		conv_err = nil
-		num = list_position * config.Page_entries
+		num = entry_list.Position * config.Page_entries
 	}
 	if conv_err == nil {
 		title, text := PrintEntry(num)
-		article = &Article{Title: title, Lines: strings.Split(text, "\n")}
+		article = &Article{Title: title, Lines: strings.Split(text, "\n"), Position: 0}
 
-		PrintArticleSection(t)
+		t.Write([]byte(PrintArticleSection()))
 		if article != nil {
 			prompt := fmt.Sprintf("(%d) > ", num)
 			t.SetPrompt(prompt)
@@ -286,9 +301,9 @@ func ProcessInput(t *term.Terminal, req string) bool {
 	case "l", "list":
 		t.Write([]byte(PrintEntryList()))
 	case "n", "next":
-		t.Write([]byte(SwitchNext()))
+		t.Write([]byte(SwitchEntryListNext()))
 	case "p", "prev", "previous":
-		t.Write([]byte(SwitchPrev()))
+		t.Write([]byte(SwitchEntryListPrev()))
 	case "h", "help", "?":
 		t.Write([]byte(PrintHelpMsg()))
 	case "q", "quit":
@@ -301,11 +316,14 @@ func ProcessInput(t *term.Terminal, req string) bool {
 
 func ProcessInputEntry(t *term.Terminal, req string) {
 	switch req {
-	case "", "c", "continue":
-		PrintArticleSection(t)
-		if article == nil {
+	case "", "c", "continue", "n", "next":
+		t.Write([]byte(SwitchArticleNext()))
+		if (article.Position + 1) * config.Lines >= len(article.Lines) {
+			article = nil
 			t.SetPrompt("> ")
 		}
+	case "p", "prev", "previous":
+		t.Write([]byte(SwitchArticlePrev()))
 	case "q", "quit":
 		article = nil
 		t.SetPrompt("> ")
