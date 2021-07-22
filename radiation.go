@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"log"
+	"time"
 	"sync"
 	"encoding/json"
 	"net/http"
@@ -19,7 +20,6 @@ const (
 	entrylist_url = "/v1/entries?status=unread&direction=desc"
 	entry_url = "/v1/entries"
 	config_filename = ".radiation"
-	max_retries = 5
 )
 
 var (
@@ -50,8 +50,10 @@ type EntryList struct {
 type Config struct {
 	Token string
 	Server_url string
-	Page_entries int
-	Lines int
+	Lines_entrylist int
+	Lines_article int
+	Retry_interval time.Duration
+	Retry_max int
 }
 
 type Article struct {
@@ -106,21 +108,23 @@ func PutRequestOnce(url, content, content_type string) ([]byte, error) {
 }
 
 func GetRequest(url string) (data []byte, err error) {
-	for count := 0; count < max_retries; count++ {
+	for count := 0; count < config.Retry_max; count++ {
 		data, err = GetRequestOnce(url)
 		if err == nil {
 			return data, nil
 		}
+		time.Sleep(config.Retry_interval)
 	}
 	return nil, fmt.Errorf("retrying failed %s", err)
 }
 
 func PutRequest(url, content, content_type string) (data []byte, err error) {
-	for count := 0; count < max_retries; count++ {
+	for count := 0; count < config.Retry_max; count++ {
 		data, err = PutRequestOnce(url, content, content_type)
 		if err == nil {
 			return data, nil
 		}
+		time.Sleep(config.Retry_interval)
 	}
 	return nil, fmt.Errorf("retrying failed %s", err)
 }
@@ -216,7 +220,7 @@ func PrintEntry(num int) (string, string, int) {
 	entry_list.Entries = append(entry_list.Entries[:num], entry_list.Entries[num + 1:]...)
 	if len(entry_list.Entries) == 0 {
 		entry_list.Position = 0;
-	} else if entry_list.Position * config.Page_entries >= len(entry_list.Entries) {
+	} else if entry_list.Position * config.Lines_entrylist >= len(entry_list.Entries) {
 		entry_list.Position--;
 	}
 
@@ -228,8 +232,8 @@ func PrintEntryList() string {
 		return "Empty entry list\n"
 	}
 	var str string
-	for index := 0; index < config.Page_entries; index++ {
-		pos := index + entry_list.Position * config.Page_entries;
+	for index := 0; index < config.Lines_entrylist; index++ {
+		pos := index + entry_list.Position * config.Lines_entrylist;
 		if pos >= len(entry_list.Entries) {
 			break
 		}
@@ -268,7 +272,7 @@ func RefreshEntryList() string {
 }
 
 func SwitchEntryListNext() string {
-	if (entry_list.Position + 1) * config.Page_entries < len(entry_list.Entries) {
+	if (entry_list.Position + 1) * config.Lines_entrylist < len(entry_list.Entries) {
 		entry_list.Position++
 		return PrintEntryList()
 	} else {
@@ -286,7 +290,7 @@ func SwitchEntryListPrev() string {
 }
 
 func SwitchArticleNext() string {
-	if (article.Position + 1) * config.Lines < len(article.Lines) {
+	if (article.Position + 1) * config.Lines_article < len(article.Lines) {
 		article.Position++
 		return PrintArticleSection()
 	} else {
@@ -304,8 +308,8 @@ func SwitchArticlePrev() string {
 }
 
 func PrintArticleSection() string {
-	begin := article.Position * config.Lines
-	end := (article.Position + 1) * config.Lines
+	begin := article.Position * config.Lines_article
+	end := (article.Position + 1) * config.Lines_article
 	if len(article.Lines) < end {
 		end = len(article.Lines)
 	}
@@ -317,7 +321,7 @@ func ProcessInput(t *term.Terminal, req string) bool {
 	num, conv_err := strconv.Atoi(req)
 	if req == "" {
 		conv_err = nil
-		num = entry_list.Position * config.Page_entries
+		num = entry_list.Position * config.Lines_entrylist
 	}
 	if conv_err == nil {
 		title, text, id := PrintEntry(num)
@@ -367,7 +371,7 @@ func ProcessInputEntry(t *term.Terminal, req string) {
 	switch req {
 	case "", "c", "continue", "n", "next":
 		t.Write([]byte(SwitchArticleNext()))
-		if (article.Position + 1) * config.Lines >= len(article.Lines) {
+		if (article.Position + 1) * config.Lines_article >= len(article.Lines) {
 			article = nil
 			t.SetPrompt("> ")
 		}
